@@ -1,14 +1,18 @@
 
 
 use std::error::Error;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::{Json, Router};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
+use chrono::{FixedOffset, Utc};
+use futures::TryStreamExt;
 use mongodb::bson::{doc, DateTime};
 use mongodb::{Client, Collection};
 use mongodb::bson::oid::ObjectId;
+use mongodb::options::FindOptions;
 use mongodb::results::InsertOneResult;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -16,6 +20,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 const MONGO_URL: &str = "mongodb://127.0.0.1:27017/";
 const POINT_TYPE: &str = "Point";
+static TZ_UTC_PLUS8: Lazy<FixedOffset> = Lazy::new(||{
+    FixedOffset::east_opt(8 * 3600).unwrap()
+});
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -33,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     let app = Router::new()
         .route("/", get(||async { "hello".to_string() }))
-        .route("/api/userposition", post(post_position))
+        .route("/api/userposition", post(post_position).get(query_position))
         .layer(TraceLayer::new_for_http())
         .with_state(collection);
     tracing::debug!("Listening on {}", listener.local_addr()?);
@@ -54,6 +61,46 @@ async fn post_position(
     };
     let result = db.insert_one(user_postiton).await.map_err(internal_error)?;
     Ok(Json(result))
+}
+
+async fn query_position(
+    State(collection): State<Collection<UserPosition>>,
+    Query(query): Query<QueryUserPosition>,
+) -> Result<Json<Vec<QueryUserPositionResult>>, (StatusCode, String)> {
+    let lng = query.lng;
+    let lat = query.lat;
+    let filter = doc! {
+        "location": {
+            "$nearSphere": {
+                "$geometry": {
+                    "type": "Point",
+                    "coordinates": [lng, lat]
+                },
+                "$maxDistance": 2000,
+            }
+        }
+    };
+    let options = FindOptions::builder()
+        .limit(1000)
+        .build();
+
+    let mut cursor = collection.find(filter).with_options(options).await.map_err(internal_error)?;
+    let mut results = vec![];
+    while let Some(rec) = cursor.try_next().await.map_err(internal_error)? {
+        let UserPosition {
+            id, user, create_at, location
+        } = rec;
+        let utc: chrono::DateTime<Utc> = create_at.to_system_time().into();
+
+        let rec = QueryUserPositionResult {
+            id: id.to_hex(),
+            user,
+            create_time: utc.with_timezone(&*TZ_UTC_PLUS8).format("%Y-%m-%d %H:%M:%S").to_string(),
+            location: location.coordinates,
+        };
+        results.push(rec);
+    }
+    Ok(Json(results))
 }
 
 fn internal_error<E>(err: E) -> (StatusCode, String)
@@ -93,6 +140,21 @@ struct CreateUserPosition {
     user: String,
     lng: f64,
     lat: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct QueryUserPosition {
+    lng: f64,
+    lat: f64,
+}
+
+#[derive(Serialize)]
+struct QueryUserPositionResult {
+    id: String,
+    user: String,
+    #[serde(rename = "createTime")]
+    create_time: String,
+    location: [f64; 2]
 }
 
 #[cfg(test)]
@@ -139,6 +201,7 @@ mod tests {
             }
         }
     }
+
 
     // DO NOT DELETE
     // #[tokio::test]
