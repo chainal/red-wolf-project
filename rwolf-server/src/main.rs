@@ -4,7 +4,7 @@ use std::error::Error;
 use axum::extract::{Query, State};
 use axum::{Json, Router};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::post;
 use chrono::{FixedOffset, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{doc, DateTime};
@@ -14,6 +14,7 @@ use mongodb::options::FindOptions;
 use mongodb::results::InsertOneResult;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -39,8 +40,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
     let app = Router::new()
-        .route("/", get(||async { "hello".to_string() }))
         .route("/api/userposition", post(post_position).get(query_position))
+        .fallback_service(
+            ServeDir::new("vite-leaflet-demo/dist").append_index_html_on_directories(true)
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(collection);
     tracing::debug!("Listening on {}", listener.local_addr()?);
