@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .unwrap_or_else(|_|format!("{}=debug,tower_http=debug", env!("CARGO_CRATE_NAME")).into()))
         .with(tracing_subscriber::fmt::layer())
         .init();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    let listener = tokio::net::TcpListener::bind("[::]:3000").await?;
     let app = Router::new()
         .route("/api/userposition", post(post_position).get(query_position))
         .fallback_service(
