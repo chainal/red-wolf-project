@@ -1,19 +1,21 @@
 
 
 use std::error::Error;
+use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::{Json, Router};
 use axum::http::StatusCode;
 use axum::routing::post;
 use chrono::{FixedOffset, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::{doc, DateTime};
+use mongodb::bson::{doc, Bson, DateTime};
 use mongodb::{Client, Collection};
 use mongodb::bson::oid::ObjectId;
 use mongodb::options::FindOptions;
-use mongodb::results::InsertOneResult;
+use names::Name;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -45,31 +47,79 @@ async fn main() -> Result<(), Box<dyn Error>> {
             ServeDir::new("vite-leaflet-demo/dist").append_index_html_on_directories(true)
         )
         .layer(TraceLayer::new_for_http())
-        .with_state(collection);
+        .with_state(AppState {
+            collection,
+            name_mutex: Arc::new(Mutex::new(()))
+        });
     tracing::debug!("Listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
 }
 
 async fn post_position(
-    State(db): State<Collection<UserPosition>>,
+    State(state): State<AppState>,
     Json(input): Json<CreateUserPosition>,
-) -> Result<Json<InsertOneResult>, (StatusCode, String)> {
-    let datetime = DateTime::now();
+) -> Result<Json<CreateUserPositionResp>, (StatusCode, String)> {
+    let AppState { collection, name_mutex } = state;
+    let CreateUserPosition {user, lng, lat} = input;
+    match user {
+        None => create_user_first_log(name_mutex, lng, lat, &collection).await,
+        Some(u) => {
+            let names = collection.distinct("user", doc! {}).await.map_err(internal_error)?;
+            if names.iter().any(|b|b.as_str() == Some(&u)) {
+                create_position(u, lng, lat, &collection).await
+            } else {
+                Err((StatusCode::BAD_REQUEST, format!("user not found - {}", u)))
+            }
+
+        },
+    }
+}
+
+async fn create_position(username: String, lng: f64, lat: f64, collection: &Collection<UserPosition>) -> Result<Json<CreateUserPositionResp>, (StatusCode, String)> {
     let user_postiton = UserPosition {
         id: ObjectId::new(),
-        user: input.user,
-        create_at: datetime,
-        location: GeoPoint::new(input.lng, input.lat),
+        user: username.clone(),
+        create_at: DateTime::now(),
+        location: GeoPoint::new(lng, lat),
     };
-    let result = db.insert_one(user_postiton).await.map_err(internal_error)?;
-    Ok(Json(result))
+    let result = collection.insert_one(user_postiton).await.map_err(internal_error)?;
+    let oid = result.inserted_id.as_object_id().ok_or_else(||(StatusCode::INTERNAL_SERVER_ERROR, "parse objectId error".to_string()))?;
+    Ok(Json(CreateUserPositionResp {
+        id: oid.to_hex(),
+        user: username,
+    }))
+}
+
+async fn create_user_first_log(mutex: Arc<Mutex<()>>, lng: f64, lat: f64, collection: &Collection<UserPosition>) -> Result<Json<CreateUserPositionResp>, (StatusCode, String)> {
+    let _name_lock = mutex.lock().await;
+    let names = collection.distinct("user", doc! {}).await.map_err(internal_error)?;
+    let new_name = gen_name_loop(names)?;
+    create_position(new_name, lng, lat, collection).await
+}
+
+fn gen_name_loop(names: Vec<Bson>) -> Result<String, (StatusCode, String)> {
+    let mut generator_numbered = names::Generator::with_naming(Name::Numbered);
+    loop {
+        match generator_numbered.next() {
+            None => break Err((StatusCode::INTERNAL_SERVER_ERROR, "generate name error".to_string())),
+            Some(new_name) => {
+                if names.iter().any(|b| b.as_str() == Some(&new_name)) {
+                    tracing::warn!("create name dup occurred {}", new_name);
+                    continue;
+                } else {
+                    break Ok(new_name)
+                }
+            }
+        }
+    }
 }
 
 async fn query_position(
-    State(collection): State<Collection<UserPosition>>,
+    State(state): State<AppState>,
     Query(query): Query<QueryUserPosition>,
 ) -> Result<Json<Vec<QueryUserPositionResult>>, (StatusCode, String)> {
+    let AppState { collection, name_mutex: _ } = state;
     let lng = query.lng;
     let lat = query.lat;
     let filter = doc! {
@@ -111,6 +161,11 @@ where E: Error {
     (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
 }
 
+#[derive(Clone)]
+struct AppState {
+    collection: Collection<UserPosition>,
+    name_mutex: Arc<Mutex<()>>
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct UserPosition {
@@ -140,9 +195,15 @@ impl GeoPoint {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct CreateUserPosition {
-    user: String,
+    user: Option<String>,
     lng: f64,
     lat: f64,
+}
+
+#[derive(Serialize)]
+struct CreateUserPositionResp {
+    id: String,
+    user: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +227,7 @@ mod tests {
     use mongodb::{Client, Collection};
     use mongodb::bson::doc;
     use mongodb::bson::oid::ObjectId;
+    use names::Name;
     use crate::{UserPosition, MONGO_URL};
 
     #[tokio::test]
@@ -193,18 +255,32 @@ mod tests {
     async fn delete_records() {
         let client = Client::with_uri_str(MONGO_URL).await.unwrap();
         let collection: Collection<UserPosition> = client.database("rwolf").collection("user_positions");
-        let id = ObjectId::parse_str("69417f7df39c2647a36fb0a7").unwrap();
-        let result = collection.delete_one(doc! {"_id": id}).await;
-        match result {
-            Ok(result) => {
-                println!("delete success {:?}", result);
-            },
-            Err(e) => {
-                println!("delete error {}", e);
+        let id = vec![
+            ObjectId::parse_str("694a4e92bde38612eb7010e7").unwrap(),
+            ObjectId::parse_str("694a52f9da0c2d3c6b50301d").unwrap(),
+            ObjectId::parse_str("694a530eda0c2d3c6b50301e").unwrap(),
+        ];
+        for id in id {
+            let result = collection.delete_one(doc! {"_id": id}).await;
+            match result {
+                Ok(result) => {
+                    println!("delete success {:?}", result);
+                },
+                Err(e) => {
+                    println!("delete error {}", e);
+                }
             }
         }
+
     }
 
+    #[tokio::test]
+    async fn names_gen() {
+        let mut generator = names::Generator::default();
+        println!("{}", generator.next().unwrap());
+        let mut generator_numbered = names::Generator::with_naming(Name::Numbered);
+        println!("{}", generator_numbered.next().unwrap());
+    }
 
     // DO NOT DELETE
     // #[tokio::test]
@@ -213,6 +289,15 @@ mod tests {
     //     let collection: Collection<UserPosition> = client.database("rwolf").collection("user_positions");
     //     let index = IndexModel::builder()
     //         .keys(doc! {"location": "2dsphere"})
+    //         .build();
+    //     collection.create_index(index).await.unwrap();
+    // }
+    // #[tokio::test]
+    // async fn create_name_index() {
+    //     let client = Client::with_uri_str(MONGO_URL).await.unwrap();
+    //     let collection: Collection<UserPosition> = client.database("rwolf").collection("user_positions");
+    //     let index = IndexModel::builder()
+    //         .keys(doc!{"user": 1})
     //         .build();
     //     collection.create_index(index).await.unwrap();
     // }
