@@ -129,7 +129,7 @@ async fn query_position(
                     "type": "Point",
                     "coordinates": [lng, lat]
                 },
-                "$maxDistance": 2000,
+                "$maxDistance": 20000,
             }
         }
     };
