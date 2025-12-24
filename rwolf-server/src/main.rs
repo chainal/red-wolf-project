@@ -256,8 +256,8 @@ mod tests {
         let client = Client::with_uri_str(MONGO_URL).await.unwrap();
         let collection: Collection<UserPosition> = client.database("rwolf").collection("user_positions");
         let id = vec![
-            ObjectId::parse_str("694a4e92bde38612eb7010e7").unwrap(),
-            ObjectId::parse_str("694a52f9da0c2d3c6b50301d").unwrap(),
+            ObjectId::parse_str("69418386e23fe4e12e20e60f").unwrap(),
+            ObjectId::parse_str("6942d7cb5d25ecbd1e5243e7").unwrap(),
             ObjectId::parse_str("694a530eda0c2d3c6b50301e").unwrap(),
         ];
         for id in id {

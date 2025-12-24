@@ -25,19 +25,78 @@
               8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"
           />
         </svg>
-      </a>
+    </a>
+    <var-fab right="40" bottom="40" z-index="1002" v-model:active="fabActive">
+      <var-button type="info" icon-container @click.stop="onClickUpload">
+        <var-icon name="map-marker-radius" />
+      </var-button>
+    </var-fab>
+    
+    <div class="chip-layer">
+      <var-chip>
+          <var-icon name="account-circle" />
+          {{ userNameChip }}
+      </var-chip>
+    </div>
     
   </div>
   
 </template>
 
 <script setup>
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import L from 'leaflet'
 
 const MAP_VIEW_KEY = 'leaflet:lastView'
+const USER_NAME_KEY = 'chip:username'
+const fabActive = ref(false)
+const userNameChip = ref('...')
+let markerLayer = null
+
+async function onClickUpload() {
+  const { lat, lng, _ } = JSON.parse(localStorage.getItem(MAP_VIEW_KEY))
+  const savedUsername = localStorage.getItem(USER_NAME_KEY)
+  const payload = {
+    user: savedUsername || null,
+    lng: lng,
+    lat: lat,
+  }
+
+  try {
+    const resp = await fetch('/api/userposition', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    })
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`)
+    }
+
+    /** @type {{ id: string, user: string }} */
+    const data = await resp.json()
+
+    console.log('Create Success:', JSON.stringify(data))
+    localStorage.setItem(USER_NAME_KEY, data.user)
+    userNameChip.value = data.user
+    fabActive.value = false
+
+    await loadPoints(lng, lat)
+
+  } catch (err) {
+    console.error('Create Error:', err)
+  }
+  
+}
 
 onMounted(() => {
+  const savedUsername = localStorage.getItem(USER_NAME_KEY)
+  if (savedUsername) {
+    userNameChip.value = savedUsername
+  }
+
   const map = L.map('map')
 
   // 高德地图瓦片
@@ -49,6 +108,7 @@ onMounted(() => {
       attribution: '© 高德地图'
     }
   ).addTo(map)
+  markerLayer = L.layerGroup().addTo(map)
 
   restoreView(map)
 
@@ -93,7 +153,7 @@ function restoreView(map) {
 }
 
 function saveMapView(map) {
-  const save = () => {
+  const save = async () => {
     const center = map.getCenter()
     const zoom = map.getZoom()
 
@@ -105,10 +165,59 @@ function saveMapView(map) {
         zoom
       })
     )
+
+    await loadPoints(center.lng, center.lat)
   }
 
   // 移动 & 缩放结束时保存
   map.on('moveend zoomend', save)
+}
+
+async function loadPoints(lng, lat) {
+  try {
+    const params = new URLSearchParams({
+      lng: String(lng),
+      lat: String(lat),
+    })
+    const resp = await fetch('/api/userposition?' + params.toString())
+    if (!resp.ok) {
+      throw new Error('HTTP ' + resp.status)
+    }
+    const points = await resp.json()
+    renderPoints(points)
+  } catch (err) {
+    console.error('fetch points error', err)
+  }
+
+}
+
+function renderPoints(points) {
+  markerLayer.clearLayers()
+
+  points.forEach(p => {
+    const lng = p.location[0]
+    const lat = p.location[1]
+
+    // 外圈（反色 / 深色）
+  L.circleMarker([lat, lng], {
+    radius: 6,
+    color: '#ffffff',     // 描边颜色（白色 / 反色）
+    weight: 2,
+    fillOpacity: 1,
+    fillColor: '#e53935', // 可选：给外圈一个深色填充
+  }).addTo(markerLayer)
+
+  // 内圈（主点）
+  L.circleMarker([lat, lng], {
+    radius: 4,
+    color: '#e53935',
+    weight: 1,
+    fillColor: '#e53935',
+    fillOpacity: 0.9,
+  })
+      .bindPopup(p.user + '<br>' + p.createTime)
+      .addTo(markerLayer)
+  })
 }
 
 </script>
@@ -174,4 +283,10 @@ function saveMapView(map) {
   color: #4078c0;
 }
 
+.chip-layer {
+  position: absolute;
+  left: 20px;
+  bottom: 20px;
+  z-index: 1003;
+}
 </style>

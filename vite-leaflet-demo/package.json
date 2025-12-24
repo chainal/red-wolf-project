@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@varlet/ui": "^3.12.3",
     "leaflet": "^1.9.4",
     "vue": "^3.5.24"
   },
